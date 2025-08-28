@@ -1,0 +1,191 @@
+#include <WiFi.h>
+#include <WiFiUdp.h>
+
+const int localPort = 4210;
+WiFiUDP Udp;
+
+// Servo
+const int servoPin = 13;
+const int pwmChannel = 0;
+const int pwmFreq = 50;
+const int pwmResolution = 16;
+const int ledoff = 25;
+const int ledon = 26;
+int servoAngle = 90;
+
+// מסך
+int screenWidth = 0;
+int centerMargin = 300;
+String moveDirection = "stop";
+
+// זמנים
+unsigned long lastMoveTime = 0;
+const int moveInterval = 65;
+
+unsigned long lastBallSeenTime = 0;
+const unsigned long scanDelay = 5000;
+
+// סריקה
+bool scanningActive = false;
+bool scanningRight = true;
+bool scanInProgress = false;
+
+// RSSI
+int lastRSSI = -1000;
+bool blinkLed = false;
+bool ledState = false;
+unsigned long lastBlinkTime = 0;
+const int blinkInterval = 100;
+
+unsigned long lastRssiPacketTime = 0;
+const int rssiTimeout = 1000;
+
+void moveServoTo(int angle) {
+  angle = constrain(angle, 0, 180);
+  int minDuty = 65535 * 0.025;
+  int maxDuty = 65535 * 0.125;
+  int duty = map(angle, 0, 180, minDuty, maxDuty);
+  ledcWrite(pwmChannel, duty);
+  Serial.print("Moved to angle: ");
+  Serial.println(angle);
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  ledcSetup(pwmChannel, pwmFreq, pwmResolution);
+  ledcAttachPin(servoPin, pwmChannel);
+  moveServoTo(servoAngle);
+
+  pinMode(ledoff, OUTPUT);
+  pinMode(ledon, OUTPUT);
+
+  WiFi.begin("AndroidAP0573", "iris1405");
+
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+    digitalWrite(ledoff, HIGH);
+  }
+  delay(500);
+  digitalWrite(ledoff, LOW);
+  delay(500);
+  digitalWrite(ledon, HIGH);
+  delay(2000);
+
+  Serial.println("\nConnected. IP address: ");
+  Serial.println(WiFi.localIP());
+
+  if (!Udp.begin(localPort)) {
+    Serial.println("UDP failed to start!");
+  } else {
+    Serial.println("UDP listening on port: " + String(localPort));
+  }
+
+  lastBallSeenTime = millis();
+}
+
+void loop() {
+  // קריאת UDP
+  char packet[255];
+  int packetSize = Udp.parsePacket();
+  if (packetSize) {
+    int len = Udp.read(packet, 254);
+    if (len > 0) packet[len] = 0;
+    String msg = String(packet);
+    Serial.print("Received: ");
+    Serial.println(msg);
+
+    if (msg.startsWith("SIZE:")) {
+      int comma = msg.indexOf(',');
+      screenWidth = msg.substring(5, comma).toInt();
+      Serial.print("Screen width set to: ");
+      Serial.println(screenWidth);
+    }
+    else if (msg.startsWith("RSSI:")) {
+      lastRSSI = msg.substring(5).toInt();
+      lastRssiPacketTime = millis();
+      Serial.print("Received RSSI: ");
+      Serial.println(lastRSSI);
+      if(lastRSSI > -45) {
+        for( int i=0; i < 3; i++) {
+          digitalWrite(ledoff, HIGH);
+          delay(100);
+          digitalWrite(ledoff, LOW);
+          delay(100);
+        }
+        delay(3000);
+      }
+    }
+    else if (msg.indexOf(',') > 0 && screenWidth > 0) {
+      int comma = msg.indexOf(',');
+      int x = msg.substring(0, comma).toInt();
+      int center = screenWidth / 2;
+      int leftBound = center - centerMargin;
+      int rightBound = center + centerMargin;
+
+      if (x < leftBound) moveDirection = "left";
+      else if (x > rightBound) moveDirection = "right";
+      else moveDirection = "stop";
+
+      // 🟢 קיבלנו כדור – אפס טיימר ועצור סריקה
+      lastBallSeenTime = millis();
+      if (scanningActive || scanInProgress) {
+        scanningActive = false;
+        scanInProgress = false;
+        Serial.println("Scan interrupted → ball detected");
+      }
+
+      Serial.print("X = ");
+      Serial.print(x);
+      Serial.print(" → Direction: ");
+      Serial.println(moveDirection);
+    }
+  }
+
+  // סריקה אוטומטית אם לא זוהה כדור
+  if ((millis() - lastBallSeenTime > scanDelay) && !scanningActive && !scanInProgress) {
+    scanningActive = true;
+    scanInProgress = true;
+    scanningRight = true;
+    Serial.println("No ball detected for 5s → start scanning");
+  }
+
+  // תנועה לפי זמן
+  if (millis() - lastMoveTime >= moveInterval) {
+    lastMoveTime = millis();
+
+    if (scanningActive) {
+      if (scanningRight) {
+        if (servoAngle < 180) {
+          servoAngle++;
+          moveServoTo(servoAngle);
+        } else {
+          scanningRight = false;
+        }
+      } else {
+        if (servoAngle > 0) {
+          servoAngle--;
+          moveServoTo(servoAngle);
+        } else {
+          scanningActive = false;
+          scanInProgress = false;
+          Serial.println("Scan complete");
+        }
+      }
+    } else {
+      if (scanInProgress) return; // לא נזיז כשעדיין בתהליך סריקה
+
+      if (moveDirection == "left" && servoAngle > 0) {
+        servoAngle--;
+        moveServoTo(servoAngle);
+      } else if (moveDirection == "right" && servoAngle < 180) {
+        servoAngle++;
+        moveServoTo(servoAngle);
+      }
+    }
+  }
+}
+
+
+זה של הסרבו
